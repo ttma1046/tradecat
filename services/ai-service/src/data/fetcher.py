@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import sqlite3
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Set
 
@@ -20,12 +21,21 @@ TELEGRAM_SRC = PROJECT_ROOT / "services" / "telegram-service" / "src"
 if str(TELEGRAM_SRC) not in sys.path:
     sys.path.insert(0, str(TELEGRAM_SRC))
 
-# TimescaleDB 连接配置
-DB_HOST = os.getenv("TIMESCALE_HOST", "localhost")
-DB_PORT = os.getenv("TIMESCALE_PORT", "5433")
-DB_USER = os.getenv("TIMESCALE_USER", "postgres")
-DB_PASS = os.getenv("TIMESCALE_PASSWORD", "postgres")
-DB_NAME = os.getenv("TIMESCALE_DB", "market_data")
+# TimescaleDB 连接配置（优先 DATABASE_URL）
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("TIMESCALE_DATABASE_URL")
+if DATABASE_URL:
+    parsed = urlparse(DATABASE_URL)
+    DB_HOST = parsed.hostname or os.getenv("TIMESCALE_HOST", "localhost")
+    DB_PORT = str(parsed.port or os.getenv("TIMESCALE_PORT", "5433"))
+    DB_USER = parsed.username or os.getenv("TIMESCALE_USER", "postgres")
+    DB_PASS = parsed.password or os.getenv("TIMESCALE_PASSWORD", "postgres")
+    DB_NAME = (parsed.path or "").lstrip("/") or os.getenv("TIMESCALE_DB", "market_data")
+else:
+    DB_HOST = os.getenv("TIMESCALE_HOST", "localhost")
+    DB_PORT = os.getenv("TIMESCALE_PORT", "5433")
+    DB_USER = os.getenv("TIMESCALE_USER", "postgres")
+    DB_PASS = os.getenv("TIMESCALE_PASSWORD", "postgres")
+    DB_NAME = os.getenv("TIMESCALE_DB", "market_data")
 
 ALL_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
 
@@ -219,13 +229,22 @@ def fetch_indicators_full(symbol: str) -> Dict[str, Any]:
             if sym_col is None:
                 continue
 
-            # 有周期字段：每个周期取最新一条
-            if "周期" in cols:
-                sql = f"SELECT * FROM '{tbl}' WHERE `{sym_col}`=? GROUP BY `周期` HAVING `数据时间`=MAX(`数据时间`)"
-                rows = cur.execute(sql, (symbol,)).fetchall()
-            else:
+            # 有周期字段：每个周期取最新一条（使用子查询保证确定性）
+            if "周期" in cols and "数据时间" in cols:
+                sql = (
+                    f"SELECT * FROM '{tbl}' WHERE `{sym_col}`=? "
+                    "AND (`周期`, `数据时间`) IN ("
+                    f"SELECT `周期`, MAX(`数据时间`) FROM '{tbl}' WHERE `{sym_col}`=? GROUP BY `周期`"
+                    ")"
+                )
+                rows = cur.execute(sql, (symbol, symbol)).fetchall()
+            elif "数据时间" in cols:
                 # 无周期字段：只取最新一条
                 sql = f"SELECT * FROM '{tbl}' WHERE `{sym_col}`=? ORDER BY `数据时间` DESC LIMIT 1"
+                rows = cur.execute(sql, (symbol,)).fetchall()
+            else:
+                # 无时间字段：退化为取一条
+                sql = f"SELECT * FROM '{tbl}' WHERE `{sym_col}`=? LIMIT 1"
                 rows = cur.execute(sql, (symbol,)).fetchall()
 
             if rows:
@@ -329,18 +348,87 @@ def fetch_payload(symbol: str, interval: str) -> Dict[str, Any]:
     - SQLite 指标：全部表的全部数据
     - 单币快照数据：基础/合约/高级三面板完整字段
     """
+    candles = fetch_candles(symbol, ALL_INTERVALS, limit=50)
+    metrics = fetch_metrics(symbol, limit=50)
+    indicators = fetch_indicators_full(symbol)
+    snapshot = fetch_single_token_data(symbol)
+    data_quality = _build_data_quality(candles, metrics, indicators, snapshot)
+
     return {
         "symbol": symbol,
         "interval": interval,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # K线数据（全量）
-        "candles": fetch_candles(symbol, ALL_INTERVALS, limit=50),
+        "candles": candles,
         # 期货指标（全量）
-        "metrics": fetch_metrics(symbol, limit=50),
+        "metrics": metrics,
         # SQLite 指标（全量）
-        "indicators": fetch_indicators_full(symbol),
+        "indicators": indicators,
         # 单币快照数据（复用 telegram-service）
-        "snapshot": fetch_single_token_data(symbol),
+        "snapshot": snapshot,
+        # 数据质量与完整性
+        "data_quality": data_quality,
+    }
+
+
+def _build_data_quality(
+    candles: Dict[str, List[Dict[str, Any]]],
+    metrics: List[Dict[str, Any]],
+    indicators: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+
+    missing_intervals = []
+    empty_intervals = []
+    for iv in ALL_INTERVALS:
+        rows = candles.get(iv)
+        if rows is None:
+            missing_intervals.append(iv)
+        elif not rows:
+            empty_intervals.append(iv)
+    if missing_intervals or empty_intervals:
+        warnings.append(f"candles_missing={missing_intervals}, empty={empty_intervals}")
+
+    metrics_count = len(metrics) if metrics else 0
+    if metrics_count == 0:
+        warnings.append("metrics_empty")
+
+    indicator_error_tables = []
+    if isinstance(indicators, dict):
+        if "error" in indicators and len(indicators) == 1:
+            indicator_error_tables.append("all")
+        else:
+            for name, value in indicators.items():
+                if isinstance(value, dict) and "error" in value:
+                    indicator_error_tables.append(name)
+    indicator_tables = len(indicators) if isinstance(indicators, dict) else 0
+    if indicator_tables == 0 or indicator_error_tables:
+        warnings.append(f"indicators_errors={indicator_error_tables}")
+
+    snapshot_ok = bool(snapshot)
+    if not snapshot_ok:
+        warnings.append("snapshot_empty")
+
+    return {
+        "ok": len(warnings) == 0,
+        "warnings": warnings,
+        "candles": {
+            "total_intervals": len(ALL_INTERVALS),
+            "missing_intervals": missing_intervals,
+            "empty_intervals": empty_intervals,
+        },
+        "metrics": {
+            "count": metrics_count,
+        },
+        "indicators": {
+            "tables": indicator_tables,
+            "error_tables": indicator_error_tables,
+        },
+        "snapshot": {
+            "ok": snapshot_ok,
+            "sections": list(snapshot.keys()) if isinstance(snapshot, dict) else [],
+        },
     }
 
 

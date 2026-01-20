@@ -114,7 +114,7 @@ class CommandHandler {
         // /unsubscribe 命令 - 取消订阅
         this.bot.onText(/\/unsubscribe/, (msg) => this.handleUnsubscribe(msg));
 
-        // /csv 命令 - 生成CSV报告（仅管理员）
+        // /csv 命令 - 生成CSV报告（全员可用）
         this.bot.onText(/\/csv/, (msg) => this.handleCsvReport(msg));
 
         console.log('✅ 命令处理器已绑定（统一面板模式）');
@@ -1424,22 +1424,12 @@ class CommandHandler {
     }
 
     /**
-     * /csv 命令 - 生成CSV报告（仅管理员）
+     * /csv 命令 - 生成CSV报告（全员可用）
      */
     async handleCsvReport(msg) {
         const chatId = msg.chat.id;
-        const adminIds = this.config.telegram.adminIds || [];
-        
-        console.log(`📊 [CSV] 收到 /csv 命令, chatId=${chatId}, adminIds=${JSON.stringify(adminIds)}`);
-        
-        // 检查是否为管理员
-        if (!adminIds.includes(String(chatId))) {
-            console.log(`⛔ [CSV] 非管理员: ${chatId}`);
-            await this.bot.sendMessage(chatId, '⛔ 此命令仅限管理员使用');
-            return;
-        }
-        
-        console.log(`✅ [CSV] 管理员验证通过: ${chatId}`);
+
+        console.log(`📊 [CSV] 收到 /csv 命令, chatId=${chatId}`);
         await this.bot.sendMessage(chatId, '📊 正在生成 CSV 报告 (滚动24小时)...\n⏳ 预计需要1-2分钟，请稍候...');
         
         try {
@@ -1447,13 +1437,14 @@ class CommandHandler {
             const path = require('path');
             const fs = require('fs');
             
-            const scriptPath = path.join(__dirname, '../scripts/csv-report-api.js');
+            const scriptPath = path.join(__dirname, '../scripts/csv-report.js');
             
             // 执行脚本
+            const timeoutMs = Number(process.env.CSV_REPORT_TIMEOUT_MS || 180000);
             const csv = execSync(`node "${scriptPath}"`, {
                 encoding: 'utf-8',
-                timeout: 120000,  // 2分钟超时
-                maxBuffer: 10 * 1024 * 1024  // 10MB
+                timeout: Number.isFinite(timeoutMs) ? timeoutMs : 180000,
+                maxBuffer: 20 * 1024 * 1024
             });
             
             // 保存为文件

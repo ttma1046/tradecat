@@ -575,7 +575,18 @@ def check_click_rate_limit(user_id: int, button_data: str = "", is_ai_feature: b
     return True, 0.0
 
 # ==================== 单币快照辅助 ====================
-def build_single_snapshot_keyboard(enabled_periods: dict, panel: str, enabled_cards: dict, page: int = 0, pages: int = 1, update=None, lang: str = None):
+def _build_binance_url(symbol: str, market: str = "futures") -> str:
+    """构造 Binance 跳转链接，默认永续合约。"""
+    sym = (symbol or "").upper().replace("/", "")
+    if not sym.endswith("USDT"):
+        sym = f"{sym}USDT"
+    if market == "spot":
+        base = sym.replace("USDT", "_USDT", 1)
+        return f"https://www.binance.com/en/trade/{base}?type=spot"
+    return f"https://www.binance.com/en/futures/{sym}?type=perpetual"
+
+
+def build_single_snapshot_keyboard(enabled_periods: dict, panel: str, enabled_cards: dict, page: int = 0, pages: int = 1, update=None, lang: str = None, symbol: str | None = None):
     """构造单币快照按钮：卡片开关/周期开关/面板切换/主控+翻页。"""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     try:
@@ -730,6 +741,12 @@ def build_single_snapshot_keyboard(enabled_periods: dict, panel: str, enabled_ca
     kb_rows: list[list[InlineKeyboardButton]] = []
     if row_cards:
         kb_rows.extend(row_cards)
+    # Binance 跳转按钮
+    if symbol:
+        market = "futures" if panel == "futures" else "spot"
+        binance_url = _build_binance_url(symbol, market=market)
+        kb_rows.append([InlineKeyboardButton(I18N.gettext("btn.binance", lang=lang), url=binance_url)])
+
     kb_rows.extend([row_period, row_panel, row_ctrl])
     return InlineKeyboardMarkup(kb_rows)
 
@@ -793,7 +810,7 @@ def render_single_snapshot(symbol: str, panel: str, enabled_periods: dict, enabl
         page=page,
         lang=lang,
     )
-    keyboard = build_single_snapshot_keyboard(enabled_periods, panel, enabled_cards, page=page, pages=pages, update=update, lang=lang)
+    keyboard = build_single_snapshot_keyboard(enabled_periods, panel, enabled_cards, page=page, pages=pages, update=update, lang=lang, symbol=symbol)
     return text, keyboard, pages, page
 
 # 🤖 AI分析模块已下线（历史依赖 pandas/numpy/pandas-ta）。
@@ -3497,7 +3514,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 page=0,
                 lang=lang,
             )
-            kb = build_single_snapshot_keyboard(enabled_periods, "basic", {}, page=0, pages=pages, update=update, lang=lang)
+            kb = build_single_snapshot_keyboard(enabled_periods, "basic", {}, page=0, pages=pages, update=update, lang=lang, symbol=symbol)
             await query.edit_message_text(text, reply_markup=kb, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"单币查询跳转失败: {e}")
@@ -5493,6 +5510,7 @@ async def handle_keyboard_message(update: Update, context: ContextTypes.DEFAULT_
                     from bot.single_token_txt import export_single_token_txt
                     import io
                     from datetime import datetime
+                    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
                     # 获取用户语言
                     lang = _resolve_lang(update)
@@ -5502,11 +5520,20 @@ async def handle_keyboard_message(update: Update, context: ContextTypes.DEFAULT_
                     file_obj = io.BytesIO(txt_content.encode('utf-8'))
                     file_obj.name = f"{sym}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 
+                    # Binance 跳转按钮（与信号一致，默认永续）
+                    binance_btn = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            I18N.gettext("btn.binance", lang=lang),
+                            url=_build_binance_url(sym, market="futures")
+                        )
+                    ]])
+
                     # 发送文件
                     await update.message.reply_document(
                         document=file_obj,
                         filename=file_obj.name,
-                        caption=_t("export.caption", update, symbol=sym)
+                        caption=_t(update, "export.caption", symbol=sym),
+                        reply_markup=binance_btn,
                     )
                 except Exception as e:
                     logger.error(f"完整TXT导出失败: {e}")
@@ -5545,7 +5572,7 @@ async def handle_keyboard_message(update: Update, context: ContextTypes.DEFAULT_
             try:
                 from bot.single_token_snapshot import SingleTokenSnapshot
                 lang = _resolve_lang(update)
-                kb = build_single_snapshot_keyboard(enabled_periods, "basic", ustate["single_cards"], page=0, pages=1, update=update, lang=lang)
+                kb = build_single_snapshot_keyboard(enabled_periods, "basic", ustate["single_cards"], page=0, pages=1, update=update, lang=lang, symbol=sym)
                 snap = SingleTokenSnapshot()
                 text, pages = snap.render_table(
                     sym,
@@ -5555,7 +5582,7 @@ async def handle_keyboard_message(update: Update, context: ContextTypes.DEFAULT_
                     page=0,
                     lang=lang,
                 )
-                kb = build_single_snapshot_keyboard(enabled_periods, "basic", ustate["single_cards"], page=0, pages=pages, update=update, lang=lang)
+                kb = build_single_snapshot_keyboard(enabled_periods, "basic", ustate["single_cards"], page=0, pages=pages, update=update, lang=lang, symbol=sym)
                 try:
                     await update.message.reply_text(text, reply_markup=kb, parse_mode='Markdown')
                 except BadRequest as e:

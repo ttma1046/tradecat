@@ -22,6 +22,17 @@ from storage.history import SignalHistory, get_history
 
 logger = logging.getLogger(__name__)
 
+
+def build_binance_url(symbol: str, market: str = "futures") -> str:
+    """构造 Binance 跳转链接。默认永续，回退加 USDT。"""
+    sym = symbol.upper().replace("/", "")
+    if not sym.endswith("USDT"):
+        sym = f"{sym}USDT"
+    if market == "spot":
+        base = sym.replace("USDT", "_USDT", 1)
+        return f"https://www.binance.com/en/trade/{base}?type=spot"
+    return f"https://www.binance.com/en/futures/{sym}?type=perpetual"
+
 # 数据库路径
 _SIGNALS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_SIGNALS_DIR))))
@@ -271,11 +282,14 @@ def get_signal_push_kb(symbol: str, *, uid: int | None = None, lang: str | None 
         lang = resolve_lang_by_user_id(uid) if uid is not None else resolve_lang()
     analyze_text = f"🔍 {coin}{_t('btn.analyze', lang=lang)}"
     ai_text = f"🤖 {_t('btn.ai_analyze', lang=lang)}"
+    binance_url = build_binance_url(symbol)
+    binance_text = _t("btn.binance", lang=lang)
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(analyze_text, callback_data=f"single_query_{symbol}"),
             InlineKeyboardButton(ai_text, callback_data=f"ai_coin_{symbol}"),
-        ]
+            InlineKeyboardButton(binance_text, url=binance_url),
+        ],
     ])
 
 
